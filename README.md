@@ -1,5 +1,3 @@
-#taskkill /IM SecureKeyOverlay.exe /F
-
 # Secure Key Overlay
 
 Windows tray utility that shows selected key presses on a click-through overlay.
@@ -30,3 +28,9 @@ Output:
 
 The build uses static C++ runtime linking, so the generated executable can be
 distributed by itself without bundling `libc++` or `libunwind` DLLs.
+
+
+- if you forgot to close the overlay and shut down the tray, then enter the instruction below to the cmd in window
+```bash
+taskkill /IM SecureKeyOverlay.exe /F
+```
