@@ -1,10 +1,12 @@
 #include <windows.h>
+#include <windowsx.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <commdlg.h>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cwctype>
 #include <string>
 #include <unordered_map>
@@ -36,6 +38,11 @@ constexpr int IDC_KEY_D = 2004;
 constexpr int IDC_KEY_CTRL = 2005;
 constexpr int IDC_KEY_SHIFT = 2006;
 constexpr int IDC_KEY_ALT = 2007;
+constexpr int IDC_KEY_TAB = 2008;
+constexpr int IDC_KEY_Q = 2009;
+constexpr int IDC_KEY_E = 2014;
+constexpr int IDC_KEY_R = 2015;
+constexpr int IDC_KEY_F = 2016;
 constexpr int IDC_CUSTOM_KEY_EDIT = 2010;
 constexpr int IDC_CUSTOM_KEY_ADD = 2011;
 constexpr int IDC_CUSTOM_KEY_LIST = 2012;
@@ -54,12 +61,16 @@ constexpr int IDC_SPACING_SLIDER = 2202;
 constexpr int IDC_COLOR_IDLE = 2203;
 constexpr int IDC_COLOR_ACTIVE = 2204;
 constexpr int IDC_COLOR_TEXT = 2205;
+constexpr int IDC_ACTIVE_ALPHA_SLIDER = 2206;
+constexpr int IDC_ARRAY_BUTTON = 2207;
 
 constexpr int IDC_PREVIEW_PANEL = 2301;
 constexpr int IDC_SETTINGS_CLOSE = 2302;
 constexpr int IDC_SETTINGS_START = 2303;
 constexpr int IDC_SETTINGS_STOP = 2304;
 constexpr int IDC_SETTINGS_STATUS = 2305;
+constexpr int IDC_CAPTURE_STATUS = 2306;
+constexpr int IDI_APP_ICON = 101;
 
 enum class AppState {
     Idle,
@@ -81,31 +92,76 @@ struct KeyDefinition {
     int controlId;
 };
 
-constexpr std::array<KeyDefinition, 7> kDefaultKeyDefs{{
+constexpr std::array<KeyDefinition, 12> kDefaultKeyDefs{{
+    {L"Tab", VK_TAB, IDC_KEY_TAB},
+    {L"Q", 'Q', IDC_KEY_Q},
     {L"W", 'W', IDC_KEY_W},
+    {L"E", 'E', IDC_KEY_E},
+    {L"R", 'R', IDC_KEY_R},
+    {L"Shift", VK_SHIFT, IDC_KEY_SHIFT},
     {L"A", 'A', IDC_KEY_A},
     {L"S", 'S', IDC_KEY_S},
     {L"D", 'D', IDC_KEY_D},
+    {L"F", 'F', IDC_KEY_F},
     {L"Ctrl", VK_CONTROL, IDC_KEY_CTRL},
-    {L"Shift", VK_SHIFT, IDC_KEY_SHIFT},
     {L"Alt", VK_MENU, IDC_KEY_ALT},
 }};
+
+struct KeyLayoutSpec {
+    UINT vk;
+    int row;
+    float startUnit;
+    float widthUnits;
+};
+
+constexpr std::array<KeyLayoutSpec, 13> kKeyboardLayoutSpecs{{
+    {VK_TAB, 0, 0.0f, 1.45f},
+    {'Q', 0, 1.60f, 1.00f},
+    {'W', 0, 2.70f, 1.00f},
+    {'E', 0, 3.80f, 1.00f},
+    {'R', 0, 4.90f, 1.00f},
+    {VK_SHIFT, 1, 0.0f, 1.80f},
+    {'A', 1, 1.95f, 1.00f},
+    {'S', 1, 3.05f, 1.00f},
+    {'D', 1, 4.15f, 1.00f},
+    {'F', 1, 5.25f, 1.00f},
+    {VK_CONTROL, 2, 0.0f, 1.55f},
+    {VK_MENU, 2, 1.75f, 1.55f},
+    {VK_SPACE, 2, 3.50f, 3.90f},
+}};
+
+struct KeyPlacement {
+    UINT vk;
+    int row;
+    RECT rect;
+};
+
+struct KeyLayoutMetrics {
+    std::vector<KeyPlacement> placements;
+    int contentWidth = 0;
+    int contentHeight = 0;
+    int keyWidth = 0;
+    int keyHeight = 0;
+};
 
 struct AppConfig {
     std::array<bool, kDefaultKeyDefs.size()> enabledDefaults{};
     std::vector<UINT> customKeys;
-    PositionPreset preset = PositionPreset::TopLeft;
+    PositionPreset preset = PositionPreset::TopRight;
     POINT customPos{100, 100};
-    int keySize = 64;
-    int spacing = 10;
-    COLORREF idleColor = RGB(105, 105, 105);
-    COLORREF activeColor = RGB(56, 176, 0);
-    COLORREF textColor = RGB(255, 255, 255);
+    int keySize = 50;
+    int spacing = 6;
+    int activeAlpha = 232;
+    COLORREF idleColor = RGB(58, 62, 68);
+    COLORREF activeColor = RGB(196, 212, 65);
+    COLORREF textColor = RGB(245, 247, 242);
+    bool useCustomArrayLayout = false;
+    std::unordered_map<UINT, POINT> customLayoutPositions;
 };
 
 struct SettingsUi {
     std::array<HWND, kDefaultKeyDefs.size()> keyChecks{};
-    HWND customEdit = nullptr;
+    HWND captureStatus = nullptr;
     HWND customAddButton = nullptr;
     HWND customList = nullptr;
     HWND customRemoveButton = nullptr;
@@ -114,9 +170,11 @@ struct SettingsUi {
     HWND customYEdit = nullptr;
     HWND keySizeSlider = nullptr;
     HWND spacingSlider = nullptr;
+    HWND activeAlphaSlider = nullptr;
     HWND idleColorButton = nullptr;
     HWND activeColorButton = nullptr;
     HWND textColorButton = nullptr;
+    HWND arrayButton = nullptr;
     HWND previewPanel = nullptr;
     HWND statusLabel = nullptr;
     HWND startButton = nullptr;
@@ -135,6 +193,10 @@ AppConfig g_config{};
 AppState g_state = AppState::Idle;
 bool g_rawInputRegistered = false;
 std::unordered_map<UINT, bool> g_pressed;
+bool g_captureCustomKey = false;
+bool g_arrayEditMode = false;
+UINT g_draggingKey = 0;
+POINT g_dragOffset{};
 
 HFONT g_uiFont = nullptr;
 UINT g_taskbarCreatedMessage = 0;
@@ -291,6 +353,28 @@ bool ParseKeyText(const std::wstring& userText, UINT& outVk) {
     return false;
 }
 
+UINT NormalizeCapturedVKey(UINT vk) {
+    if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) {
+        return VK_SHIFT;
+    }
+    if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL) {
+        return VK_CONTROL;
+    }
+    if (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) {
+        return VK_MENU;
+    }
+    return vk;
+}
+
+const KeyLayoutSpec* FindLayoutSpec(UINT vk) {
+    for (const auto& spec : kKeyboardLayoutSpecs) {
+        if (spec.vk == vk) {
+            return &spec;
+        }
+    }
+    return nullptr;
+}
+
 UINT NormalizeRawVKey(const RAWKEYBOARD& keyboard) {
     UINT vk = keyboard.VKey;
     if (vk == 0 || vk == 255) {
@@ -339,6 +423,208 @@ std::vector<UINT> CurrentSelectedKeys() {
     return selected;
 }
 
+KeyLayoutMetrics BuildAutoKeyLayoutMetrics() {
+    KeyLayoutMetrics metrics{};
+    const auto selectedKeys = CurrentSelectedKeys();
+    if (selectedKeys.empty()) {
+        return metrics;
+    }
+
+    metrics.keyWidth = g_config.keySize;
+    metrics.keyHeight = std::max(30, static_cast<int>(std::lround(g_config.keySize * 0.78f)));
+    const int spacing = g_config.spacing;
+    const int rowGap = std::max(12, spacing + 8);
+    const float pitchX = static_cast<float>(metrics.keyWidth + spacing);
+    const int pitchY = metrics.keyHeight + rowGap;
+
+    int maxKnownRow = -1;
+    std::vector<UINT> fallbackKeys;
+    for (UINT vk : selectedKeys) {
+        const KeyLayoutSpec* spec = FindLayoutSpec(vk);
+        if (spec == nullptr) {
+            fallbackKeys.push_back(vk);
+            continue;
+        }
+
+        const int left = static_cast<int>(std::lround(spec->startUnit * pitchX));
+        const int top = spec->row * pitchY;
+        const int width = static_cast<int>(std::lround((spec->widthUnits * metrics.keyWidth) + ((spec->widthUnits - 1.0f) * spacing)));
+        const int height = metrics.keyHeight;
+        metrics.placements.push_back(KeyPlacement{vk, spec->row, RECT{left, top, left + width, top + height}});
+        metrics.contentWidth = std::max(metrics.contentWidth, left + width);
+        metrics.contentHeight = std::max(metrics.contentHeight, top + height);
+        maxKnownRow = std::max(maxKnownRow, spec->row);
+    }
+
+    const int fallbackStartRow = maxKnownRow + 1;
+    constexpr int kFallbackColumns = 5;
+    for (size_t i = 0; i < fallbackKeys.size(); ++i) {
+        const int row = fallbackStartRow + static_cast<int>(i / kFallbackColumns);
+        const int column = static_cast<int>(i % kFallbackColumns);
+        const int left = column * static_cast<int>(std::lround(pitchX));
+        const int top = row * pitchY;
+        const int width = metrics.keyWidth;
+        const int height = metrics.keyHeight;
+        metrics.placements.push_back(KeyPlacement{fallbackKeys[i], row, RECT{left, top, left + width, top + height}});
+        metrics.contentWidth = std::max(metrics.contentWidth, left + width);
+        metrics.contentHeight = std::max(metrics.contentHeight, top + height);
+    }
+
+    std::sort(metrics.placements.begin(), metrics.placements.end(), [](const KeyPlacement& lhs, const KeyPlacement& rhs) {
+        if (lhs.row != rhs.row) {
+            return lhs.row < rhs.row;
+        }
+        return lhs.rect.left < rhs.rect.left;
+    });
+
+    return metrics;
+}
+
+void EnsureCustomArrayLayoutSeeded() {
+    if (!g_config.useCustomArrayLayout) {
+        return;
+    }
+
+    const KeyLayoutMetrics autoMetrics = BuildAutoKeyLayoutMetrics();
+    for (const KeyPlacement& placement : autoMetrics.placements) {
+        if (g_config.customLayoutPositions.find(placement.vk) == g_config.customLayoutPositions.end()) {
+            g_config.customLayoutPositions[placement.vk] = POINT{placement.rect.left, placement.rect.top};
+        }
+    }
+}
+
+KeyLayoutMetrics BuildKeyLayoutMetrics() {
+    if (!g_config.useCustomArrayLayout) {
+        return BuildAutoKeyLayoutMetrics();
+    }
+
+    EnsureCustomArrayLayoutSeeded();
+
+    KeyLayoutMetrics metrics{};
+    const auto selectedKeys = CurrentSelectedKeys();
+    if (selectedKeys.empty()) {
+        return metrics;
+    }
+
+    metrics.keyWidth = g_config.keySize;
+    metrics.keyHeight = std::max(30, static_cast<int>(std::lround(g_config.keySize * 0.78f)));
+
+    bool first = true;
+    int minLeft = 0;
+    int minTop = 0;
+    for (UINT vk : selectedKeys) {
+        POINT pt{0, 0};
+        auto it = g_config.customLayoutPositions.find(vk);
+        if (it != g_config.customLayoutPositions.end()) {
+            pt = it->second;
+        }
+
+        if (first) {
+            minLeft = pt.x;
+            minTop = pt.y;
+            first = false;
+        } else {
+            minLeft = std::min(minLeft, static_cast<int>(pt.x));
+            minTop = std::min(minTop, static_cast<int>(pt.y));
+        }
+    }
+
+    for (UINT vk : selectedKeys) {
+        POINT pt{0, 0};
+        auto it = g_config.customLayoutPositions.find(vk);
+        if (it != g_config.customLayoutPositions.end()) {
+            pt = it->second;
+        }
+
+        const int left = pt.x - minLeft;
+        const int top = pt.y - minTop;
+        int width = metrics.keyWidth;
+        if (const KeyLayoutSpec* spec = FindLayoutSpec(vk); spec != nullptr) {
+            width = static_cast<int>(std::lround((spec->widthUnits * metrics.keyWidth) + ((spec->widthUnits - 1.0f) * g_config.spacing)));
+        }
+        const int height = metrics.keyHeight;
+        metrics.placements.push_back(KeyPlacement{vk, 0, RECT{left, top, left + width, top + height}});
+        metrics.contentWidth = std::max(metrics.contentWidth, left + width);
+        metrics.contentHeight = std::max(metrics.contentHeight, top + height);
+    }
+
+    return metrics;
+}
+
+void SetCapturePrompt(const wchar_t* text) {
+    if (g_settingsUi.captureStatus != nullptr) {
+        SetWindowTextW(g_settingsUi.captureStatus, text);
+    }
+}
+
+RECT ComputePreviewCanvasRect(const RECT& bounds) {
+    RECT canvas = bounds;
+    InflateRect(&canvas, -10, -10);
+    return canvas;
+}
+
+POINT ComputeLayoutOrigin(const RECT& bounds, const KeyLayoutMetrics& metrics, bool previewMode) {
+    RECT canvas = bounds;
+    if (previewMode) {
+        canvas = ComputePreviewCanvasRect(bounds);
+    }
+
+    int originX = static_cast<int>(canvas.left) + 18;
+    int originY = static_cast<int>(canvas.top) + 22;
+    if (previewMode && !g_arrayEditMode) {
+        const int canvasWidth = static_cast<int>(canvas.right - canvas.left);
+        const int canvasHeight = static_cast<int>(canvas.bottom - canvas.top);
+        originX = static_cast<int>(canvas.left) + std::max(18, (canvasWidth - metrics.contentWidth) / 2);
+        originY = static_cast<int>(canvas.top) + std::max(34, (canvasHeight - metrics.contentHeight) / 2);
+    } else if (previewMode) {
+        originX = static_cast<int>(canvas.left) + 18;
+        originY = static_cast<int>(canvas.top) + 48;
+    }
+    return POINT{originX, originY};
+}
+
+float ComputePreviewScale(const RECT& bounds, const KeyLayoutMetrics& metrics) {
+    if (metrics.contentWidth <= 0 || metrics.contentHeight <= 0) {
+        return 1.0f;
+    }
+
+    const RECT canvas = ComputePreviewCanvasRect(bounds);
+    const float availableWidth = static_cast<float>((canvas.right - canvas.left) - 40);
+    const float availableHeight = static_cast<float>((canvas.bottom - canvas.top) - 82);
+    const float scaleX = availableWidth / static_cast<float>(metrics.contentWidth);
+    const float scaleY = availableHeight / static_cast<float>(metrics.contentHeight);
+    return std::clamp(std::min({scaleX, scaleY, 0.72f}), 0.38f, 0.72f);
+}
+
+RECT ScaleRectForPreview(const RECT& rect, const POINT& origin, float scale) {
+    const int width = std::max(20, static_cast<int>(std::lround((rect.right - rect.left) * scale)));
+    const int height = std::max(18, static_cast<int>(std::lround((rect.bottom - rect.top) * scale)));
+    const int left = origin.x + static_cast<int>(std::lround(rect.left * scale));
+    const int top = origin.y + static_cast<int>(std::lround(rect.top * scale));
+    return RECT{left, top, left + width, top + height};
+}
+
+void RefreshCustomKeyList();
+void NotifyConfigChanged();
+void UpdateOverlayLayout();
+void UpdateSettingsActionControls();
+
+bool TryAddCustomKey(UINT vk) {
+    vk = NormalizeCapturedVKey(vk);
+    if (vk == 0 || vk == VK_ESCAPE) {
+        return false;
+    }
+    if (!IsVkSelected(vk)) {
+        g_config.customKeys.push_back(vk);
+        RefreshCustomKeyList();
+        if (g_config.useCustomArrayLayout) {
+            EnsureCustomArrayLayoutSeeded();
+        }
+        NotifyConfigChanged();
+    }
+    return true;
+}
+
 void RefreshCustomKeyList() {
     if (g_settingsUi.customList == nullptr) {
         return;
@@ -350,8 +636,26 @@ void RefreshCustomKeyList() {
     }
 }
 
-void UpdateOverlayLayout();
-void UpdateSettingsActionControls();
+HICON LoadAppIcon(int size) {
+    return reinterpret_cast<HICON>(LoadImageW(
+        g_hInstance,
+        MAKEINTRESOURCEW(IDI_APP_ICON),
+        IMAGE_ICON,
+        size,
+        size,
+        LR_DEFAULTCOLOR
+    ));
+}
+
+void RequestAppExit() {
+    if (g_mainWindow != nullptr) {
+        DestroyWindow(g_mainWindow);
+        return;
+    }
+    if (g_settingsWindow != nullptr) {
+        DestroyWindow(g_settingsWindow);
+    }
+}
 
 void NotifyConfigChanged() {
     if (g_settingsUi.previewPanel != nullptr) {
@@ -404,8 +708,15 @@ void SyncSettingsControlsFromConfig() {
     if (g_settingsUi.spacingSlider != nullptr) {
         SendMessageW(g_settingsUi.spacingSlider, TBM_SETPOS, TRUE, g_config.spacing);
     }
+    if (g_settingsUi.activeAlphaSlider != nullptr) {
+        SendMessageW(g_settingsUi.activeAlphaSlider, TBM_SETPOS, TRUE, g_config.activeAlpha);
+    }
+    if (g_settingsUi.arrayButton != nullptr) {
+        SetWindowTextW(g_settingsUi.arrayButton, g_arrayEditMode ? L"Done" : L"Array");
+    }
 
     RefreshCustomKeyList();
+    SetCapturePrompt(g_captureCustomKey ? L"Press the key you want to overlay..." : L"Press the key you want to overlay");
     NotifyConfigChanged();
 }
 
@@ -424,13 +735,11 @@ void PickColor(HWND owner, COLORREF& target) {
 }
 
 RECT ComputeOverlayRect() {
-    const auto selectedKeys = CurrentSelectedKeys();
-    const int count = static_cast<int>(selectedKeys.size());
-    const int padding = 12;
-    const int keySize = g_config.keySize;
-    const int spacing = g_config.spacing;
-    const int width = count > 0 ? (padding * 2 + (count * keySize) + ((count - 1) * spacing)) : 240;
-    const int height = padding * 2 + keySize;
+    const KeyLayoutMetrics metrics = BuildKeyLayoutMetrics();
+    const int paddingX = 18;
+    const int paddingY = 18;
+    const int width = metrics.placements.empty() ? 260 : metrics.contentWidth + (paddingX * 2);
+    const int height = metrics.placements.empty() ? 120 : metrics.contentHeight + (paddingY * 2);
     const int margin = 24;
 
     MONITORINFO monitorInfo{};
@@ -466,40 +775,197 @@ RECT ComputeOverlayRect() {
     return rc;
 }
 
+COLORREF BlendColor(COLORREF base, COLORREF target, float amount) {
+    amount = std::clamp(amount, 0.0f, 1.0f);
+    const auto blendChannel = [amount](BYTE from, BYTE to) -> BYTE {
+        return static_cast<BYTE>(std::lround((from * (1.0f - amount)) + (to * amount)));
+    };
+    return RGB(
+        blendChannel(GetRValue(base), GetRValue(target)),
+        blendChannel(GetGValue(base), GetGValue(target)),
+        blendChannel(GetBValue(base), GetBValue(target))
+    );
+}
+
 void DrawKeys(HDC hdc, const RECT& bounds, bool previewMode) {
-    const auto selectedKeys = CurrentSelectedKeys();
-    const int padding = 12;
-    const int keySize = g_config.keySize;
-    const int spacing = g_config.spacing;
-    int x = bounds.left + padding;
-    const int y = bounds.top + padding;
+    const KeyLayoutMetrics metrics = BuildKeyLayoutMetrics();
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, g_config.textColor);
 
-    if (selectedKeys.empty()) {
+    if (metrics.placements.empty()) {
         RECT messageRect = bounds;
         DrawTextW(hdc, L"No keys selected", -1, &messageRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
 
-    HBRUSH borderBrush = CreateSolidBrush(RGB(25, 25, 25));
-    for (size_t index = 0; index < selectedKeys.size(); ++index) {
-        const UINT vk = selectedKeys[index];
-        const bool isPressed = previewMode ? (index % 2 == 0) : (g_pressed[vk]);
-        RECT keyRect{x, y, x + keySize, y + keySize};
+    RECT canvas = bounds;
+    if (previewMode) {
+        canvas = ComputePreviewCanvasRect(bounds);
+        const HBRUSH panelBrush = CreateSolidBrush(RGB(26, 30, 36));
+        const HPEN panelPen = CreatePen(PS_SOLID, 1, RGB(69, 75, 84));
+        const HGDIOBJ oldBrush = SelectObject(hdc, panelBrush);
+        const HGDIOBJ oldPen = SelectObject(hdc, panelPen);
+        RoundRect(hdc, canvas.left, canvas.top, canvas.right, canvas.bottom, 20, 20);
+        SelectObject(hdc, oldBrush);
+        SelectObject(hdc, oldPen);
+        DeleteObject(panelBrush);
+        DeleteObject(panelPen);
 
-        const COLORREF color = isPressed ? g_config.activeColor : g_config.idleColor;
-        HBRUSH keyBrush = CreateSolidBrush(color);
-        FillRect(hdc, &keyRect, keyBrush);
-        FrameRect(hdc, &keyRect, borderBrush);
-        DeleteObject(keyBrush);
-
-        const std::wstring label = VkToLabel(vk);
-        DrawTextW(hdc, label.c_str(), -1, &keyRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        x += keySize + spacing;
+        RECT captionRect{canvas.left + 18, canvas.top + 12, canvas.right - 18, canvas.top + 30};
+        SetTextColor(hdc, RGB(170, 178, 188));
+        DrawTextW(hdc, g_arrayEditMode ? L"Overlay Preview  •  Drag to rearrange" : L"Overlay Preview", -1, &captionRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(hdc, g_config.textColor);
     }
-    DeleteObject(borderBrush);
+
+    float previewScale = 1.0f;
+    POINT origin = ComputeLayoutOrigin(bounds, metrics, previewMode);
+    if (previewMode) {
+        previewScale = ComputePreviewScale(bounds, metrics);
+        const RECT canvas = ComputePreviewCanvasRect(bounds);
+        const int scaledWidth = static_cast<int>(std::lround(metrics.contentWidth * previewScale));
+        const int scaledHeight = static_cast<int>(std::lround(metrics.contentHeight * previewScale));
+        const int canvasWidth = static_cast<int>(canvas.right - canvas.left);
+        const int canvasHeight = static_cast<int>(canvas.bottom - canvas.top);
+        if (!g_arrayEditMode) {
+            origin.x = static_cast<int>(canvas.left) + std::max(18, (canvasWidth - scaledWidth) / 2);
+            origin.y = static_cast<int>(canvas.top) + std::max(36, (canvasHeight - scaledHeight) / 2);
+        } else {
+            origin.x = static_cast<int>(canvas.left) + 18;
+            origin.y = static_cast<int>(canvas.top) + 48;
+        }
+    }
+
+    HFONT keyFont = CreateFontW(
+        -std::max(12, static_cast<int>(std::lround((previewMode ? metrics.keyHeight * previewScale : metrics.keyHeight) / 2.0f))),
+        0,
+        0,
+        0,
+        FW_SEMIBOLD,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_OUTLINE_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        VARIABLE_PITCH,
+        L"Bahnschrift SemiCondensed"
+    );
+    HGDIOBJ oldFont = SelectObject(hdc, keyFont != nullptr ? keyFont : g_uiFont);
+
+    for (size_t index = 0; index < metrics.placements.size(); ++index) {
+        const KeyPlacement& placement = metrics.placements[index];
+        const bool isPressed = previewMode ? (index % 4 == 2) : g_pressed[placement.vk];
+        RECT keyRect = previewMode
+            ? ScaleRectForPreview(placement.rect, origin, previewScale)
+            : RECT{origin.x + placement.rect.left, origin.y + placement.rect.top, origin.x + placement.rect.right, origin.y + placement.rect.bottom};
+        RECT shadowRect = keyRect;
+        OffsetRect(&shadowRect, 0, 3);
+
+        COLORREF baseColor = isPressed ? g_config.activeColor : g_config.idleColor;
+        if (previewMode) {
+            baseColor = BlendColor(RGB(26, 30, 36), baseColor, g_config.activeAlpha / 255.0f);
+        }
+        const COLORREF topColor = BlendColor(baseColor, RGB(255, 255, 255), isPressed ? 0.10f : 0.18f);
+        const COLORREF faceColor = BlendColor(baseColor, RGB(0, 0, 0), isPressed ? 0.08f : 0.02f);
+        const COLORREF borderColor = BlendColor(baseColor, RGB(0, 0, 0), 0.45f);
+
+        const HBRUSH shadowBrush = CreateSolidBrush(RGB(10, 12, 16));
+        const HGDIOBJ oldShadowBrush = SelectObject(hdc, shadowBrush);
+        const HPEN shadowPen = CreatePen(PS_SOLID, 1, RGB(10, 12, 16));
+        const HGDIOBJ oldShadowPen = SelectObject(hdc, shadowPen);
+        RoundRect(hdc, shadowRect.left, shadowRect.top, shadowRect.right, shadowRect.bottom, 14, 14);
+        SelectObject(hdc, oldShadowBrush);
+        SelectObject(hdc, oldShadowPen);
+        DeleteObject(shadowBrush);
+        DeleteObject(shadowPen);
+
+        const HBRUSH keyBrush = CreateSolidBrush(faceColor);
+        const HPEN keyPen = CreatePen(PS_SOLID, 1, borderColor);
+        const HGDIOBJ oldKeyBrush = SelectObject(hdc, keyBrush);
+        const HGDIOBJ oldKeyPen = SelectObject(hdc, keyPen);
+        RoundRect(hdc, keyRect.left, keyRect.top, keyRect.right, keyRect.bottom, 14, 14);
+        SelectObject(hdc, oldKeyBrush);
+        SelectObject(hdc, oldKeyPen);
+        DeleteObject(keyBrush);
+        DeleteObject(keyPen);
+
+        RECT highlightRect = keyRect;
+        highlightRect.bottom = highlightRect.top + std::max(8, metrics.keyHeight / 3);
+        InflateRect(&highlightRect, -2, -2);
+        const HBRUSH highlightBrush = CreateSolidBrush(topColor);
+        FillRect(hdc, &highlightRect, highlightBrush);
+        DeleteObject(highlightBrush);
+
+        const std::wstring label = VkToLabel(placement.vk);
+        RECT textRect = keyRect;
+        textRect.top += isPressed ? 1 : 0;
+        DrawTextW(hdc, label.c_str(), -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    SelectObject(hdc, oldFont);
+    if (keyFont != nullptr) {
+        DeleteObject(keyFont);
+    }
+}
+
+bool HitTestPreviewKey(POINT clientPoint, UINT& outVk, POINT& outOffset) {
+    if (!g_arrayEditMode) {
+        return false;
+    }
+
+    RECT client{};
+    GetClientRect(g_settingsUi.previewPanel, &client);
+    const KeyLayoutMetrics metrics = BuildKeyLayoutMetrics();
+    const float previewScale = ComputePreviewScale(client, metrics);
+    POINT origin = ComputeLayoutOrigin(client, metrics, true);
+    const RECT canvas = ComputePreviewCanvasRect(client);
+    const int canvasWidth = static_cast<int>(canvas.right - canvas.left);
+    const int canvasHeight = static_cast<int>(canvas.bottom - canvas.top);
+    if (!g_arrayEditMode) {
+        origin.x = static_cast<int>(canvas.left) + std::max(18, (canvasWidth - static_cast<int>(std::lround(metrics.contentWidth * previewScale))) / 2);
+        origin.y = static_cast<int>(canvas.top) + std::max(36, (canvasHeight - static_cast<int>(std::lround(metrics.contentHeight * previewScale))) / 2);
+    } else {
+        origin.x = static_cast<int>(canvas.left) + 18;
+        origin.y = static_cast<int>(canvas.top) + 48;
+    }
+
+    for (const KeyPlacement& placement : metrics.placements) {
+        RECT rect = ScaleRectForPreview(placement.rect, origin, previewScale);
+        if (PtInRect(&rect, clientPoint)) {
+            outVk = placement.vk;
+            outOffset = POINT{clientPoint.x - rect.left, clientPoint.y - rect.top};
+            return true;
+        }
+    }
+    return false;
+}
+
+void UpdateDraggedKeyPosition(POINT clientPoint) {
+    if (g_draggingKey == 0 || !g_config.useCustomArrayLayout) {
+        return;
+    }
+
+    RECT client{};
+    GetClientRect(g_settingsUi.previewPanel, &client);
+    const KeyLayoutMetrics metrics = BuildKeyLayoutMetrics();
+    const float previewScale = ComputePreviewScale(client, metrics);
+    POINT origin = ComputeLayoutOrigin(client, metrics, true);
+    const RECT canvas = ComputePreviewCanvasRect(client);
+    origin.x = static_cast<int>(canvas.left) + 18;
+    origin.y = static_cast<int>(canvas.top) + 48;
+
+    POINT newPoint{
+        static_cast<LONG>(std::lround((clientPoint.x - origin.x - g_dragOffset.x) / previewScale)),
+        static_cast<LONG>(std::lround((clientPoint.y - origin.y - g_dragOffset.y) / previewScale))
+    };
+    const LONG maxX = std::max<LONG>(0, static_cast<LONG>(std::lround(((canvas.right - canvas.left) - 36) / previewScale)) - metrics.keyWidth);
+    const LONG maxY = std::max<LONG>(0, static_cast<LONG>(std::lround(((canvas.bottom - canvas.top) - 72) / previewScale)) - metrics.keyHeight);
+    newPoint.x = std::max<LONG>(0, std::min<LONG>(newPoint.x, maxX));
+    newPoint.y = std::max<LONG>(0, std::min<LONG>(newPoint.y, maxY));
+    g_config.customLayoutPositions[g_draggingKey] = newPoint;
+    NotifyConfigChanged();
 }
 
 bool RegisterRawKeyboardInput(bool enable) {
@@ -528,6 +994,7 @@ void UpdateOverlayLayout() {
         return;
     }
     const RECT rc = ComputeOverlayRect();
+    SetLayeredWindowAttributes(g_overlayWindow, RGB(255, 0, 255), static_cast<BYTE>(g_config.activeAlpha), LWA_COLORKEY | LWA_ALPHA);
     SetWindowPos(
         g_overlayWindow,
         HWND_TOPMOST,
@@ -574,7 +1041,7 @@ void StartOverlay() {
         return;
     }
 
-    SetLayeredWindowAttributes(g_overlayWindow, RGB(255, 0, 255), 255, LWA_COLORKEY);
+    SetLayeredWindowAttributes(g_overlayWindow, RGB(255, 0, 255), static_cast<BYTE>(g_config.activeAlpha), LWA_COLORKEY | LWA_ALPHA);
     UpdateOverlayLayout();
     ShowWindow(g_overlayWindow, SW_SHOWNOACTIVATE);
     g_state = AppState::Active;
@@ -598,10 +1065,16 @@ bool AddTrayIcon(HWND hwnd) {
     nid.uID = kTrayIconId;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    nid.hIcon = LoadAppIcon(GetSystemMetrics(SM_CXSMICON));
     wcscpy_s(nid.szTip, L"Secure Key Overlay");
     if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+        if (nid.hIcon != nullptr) {
+            DestroyIcon(nid.hIcon);
+        }
         return false;
+    }
+    if (nid.hIcon != nullptr) {
+        DestroyIcon(nid.hIcon);
     }
 
     nid.uVersion = NOTIFYICON_VERSION_4;
@@ -654,11 +1127,11 @@ void OpenSettingsWindow() {
         WS_EX_APPWINDOW,
         kSettingsClassName,
         L"Secure Key Overlay - Settings",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_MAXIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        760,
-        610,
+        1120,
+        700,
         nullptr,
         nullptr,
         g_hInstance,
@@ -668,8 +1141,9 @@ void OpenSettingsWindow() {
 }
 
 void CreateSettingsControls(HWND hwnd) {
-    const int margin = 16;
-    const int sectionTop = margin;
+    const int margin = 18;
+    const int headerTop = margin;
+    const int sectionTop = 62;
 
     auto createLabel = [&](const wchar_t* text, int x, int y, int w, int h) -> HWND {
         HWND label = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, w, h, hwnd, nullptr, g_hInstance, nullptr);
@@ -677,78 +1151,103 @@ void CreateSettingsControls(HWND hwnd) {
         return label;
     };
 
+    auto createGroup = [&](const wchar_t* text, int x, int y, int w, int h) -> HWND {
+        HWND group = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_GROUPBOX, x, y, w, h, hwnd, nullptr, g_hInstance, nullptr);
+        SendMessageW(group, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
+        return group;
+    };
+
     auto createCheck = [&](const wchar_t* text, int x, int y, int id) -> HWND {
-        HWND check = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, x, y, 120, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInstance, nullptr);
+        HWND check = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, x, y, 78, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInstance, nullptr);
         SendMessageW(check, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
         return check;
     };
 
-    createLabel(L"1) Key Selection", margin, sectionTop, 220, 20);
-    g_settingsUi.keyChecks[0] = createCheck(L"W", margin, sectionTop + 28, IDC_KEY_W);
-    g_settingsUi.keyChecks[1] = createCheck(L"A", margin + 70, sectionTop + 28, IDC_KEY_A);
-    g_settingsUi.keyChecks[2] = createCheck(L"S", margin + 140, sectionTop + 28, IDC_KEY_S);
-    g_settingsUi.keyChecks[3] = createCheck(L"D", margin + 210, sectionTop + 28, IDC_KEY_D);
-    g_settingsUi.keyChecks[4] = createCheck(L"Ctrl", margin, sectionTop + 56, IDC_KEY_CTRL);
-    g_settingsUi.keyChecks[5] = createCheck(L"Shift", margin + 90, sectionTop + 56, IDC_KEY_SHIFT);
-    g_settingsUi.keyChecks[6] = createCheck(L"Alt", margin + 190, sectionTop + 56, IDC_KEY_ALT);
+    createLabel(L"Secure Key Overlay", margin, headerTop, 240, 22);
+    createLabel(L"Keyboard-aligned default layout with separated controls for safer adjustment.", margin, headerTop + 22, 560, 18);
 
-    createLabel(L"Custom key:", margin, sectionTop + 92, 90, 24);
-    g_settingsUi.customEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, margin + 90, sectionTop + 90, 100, 24, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_KEY_EDIT), g_hInstance, nullptr);
-    SendMessageW(g_settingsUi.customEdit, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
-    g_settingsUi.customAddButton = CreateWindowExW(0, L"BUTTON", L"Add", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, margin + 198, sectionTop + 90, 60, 24, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_KEY_ADD), g_hInstance, nullptr);
+    createGroup(L"1) Key Selection", margin, sectionTop, 430, 264);
+    const int keySectionX = margin + 18;
+    const int keySectionY = sectionTop + 36;
+    g_settingsUi.keyChecks[0] = createCheck(L"Tab", keySectionX, keySectionY, IDC_KEY_TAB);
+    g_settingsUi.keyChecks[1] = createCheck(L"Q", keySectionX + 84, keySectionY, IDC_KEY_Q);
+    g_settingsUi.keyChecks[2] = createCheck(L"W", keySectionX + 152, keySectionY, IDC_KEY_W);
+    g_settingsUi.keyChecks[3] = createCheck(L"E", keySectionX + 220, keySectionY, IDC_KEY_E);
+    g_settingsUi.keyChecks[4] = createCheck(L"R", keySectionX + 288, keySectionY, IDC_KEY_R);
+    g_settingsUi.keyChecks[5] = createCheck(L"Shift", keySectionX, keySectionY + 36, IDC_KEY_SHIFT);
+    g_settingsUi.keyChecks[6] = createCheck(L"A", keySectionX + 108, keySectionY + 36, IDC_KEY_A);
+    g_settingsUi.keyChecks[7] = createCheck(L"S", keySectionX + 176, keySectionY + 36, IDC_KEY_S);
+    g_settingsUi.keyChecks[8] = createCheck(L"D", keySectionX + 244, keySectionY + 36, IDC_KEY_D);
+    g_settingsUi.keyChecks[9] = createCheck(L"F", keySectionX + 312, keySectionY + 36, IDC_KEY_F);
+    g_settingsUi.keyChecks[10] = createCheck(L"Ctrl", keySectionX, keySectionY + 72, IDC_KEY_CTRL);
+    g_settingsUi.keyChecks[11] = createCheck(L"Alt", keySectionX + 132, keySectionY + 72, IDC_KEY_ALT);
+
+    createLabel(L"Add overlay key", keySectionX, keySectionY + 118, 110, 24);
+    g_settingsUi.customAddButton = CreateWindowExW(0, L"BUTTON", L"Capture Key", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, keySectionX + 118, keySectionY + 116, 118, 28, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_KEY_ADD), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.customAddButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
-    g_settingsUi.customList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, margin, sectionTop + 120, 170, 100, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_KEY_LIST), g_hInstance, nullptr);
+    g_settingsUi.captureStatus = createLabel(L"Press the key you want to overlay", keySectionX, keySectionY + 148, 280, 20);
+    g_settingsUi.customList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, keySectionX, keySectionY + 176, 208, 60, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_KEY_LIST), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.customList, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
-    g_settingsUi.customRemoveButton = CreateWindowExW(0, L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, margin + 178, sectionTop + 120, 80, 24, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_KEY_REMOVE), g_hInstance, nullptr);
+    g_settingsUi.customRemoveButton = CreateWindowExW(0, L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, keySectionX + 220, keySectionY + 176, 92, 28, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_KEY_REMOVE), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.customRemoveButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
 
-    const int positionX = 300;
-    createLabel(L"2) Position", positionX, sectionTop, 180, 20);
+    const int positionX = 466;
+    createGroup(L"2) Layout & Position", positionX, sectionTop, 188, 264);
     auto createRadio = [&](const wchar_t* text, int x, int y, int id, bool first = false) -> HWND {
         const DWORD style = WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | (first ? WS_GROUP : 0);
-        HWND radio = CreateWindowExW(0, L"BUTTON", text, style, x, y, 140, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInstance, nullptr);
+        HWND radio = CreateWindowExW(0, L"BUTTON", text, style, x, y, 126, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), g_hInstance, nullptr);
         SendMessageW(radio, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
         return radio;
     };
-    g_settingsUi.positionRadios[0] = createRadio(L"Top-left", positionX, sectionTop + 28, IDC_POS_TOP_LEFT, true);
-    g_settingsUi.positionRadios[1] = createRadio(L"Top-right", positionX, sectionTop + 52, IDC_POS_TOP_RIGHT);
-    g_settingsUi.positionRadios[2] = createRadio(L"Bottom-left", positionX, sectionTop + 76, IDC_POS_BOTTOM_LEFT);
-    g_settingsUi.positionRadios[3] = createRadio(L"Bottom-right", positionX, sectionTop + 100, IDC_POS_BOTTOM_RIGHT);
-    g_settingsUi.positionRadios[4] = createRadio(L"Custom", positionX, sectionTop + 124, IDC_POS_CUSTOM);
-    createLabel(L"X:", positionX + 24, sectionTop + 150, 18, 20);
-    g_settingsUi.customXEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"100", WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, positionX + 44, sectionTop + 146, 70, 24, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_X_EDIT), g_hInstance, nullptr);
+    const int positionInnerX = positionX + 18;
+    const int positionInnerY = sectionTop + 34;
+    createLabel(L"Placed apart from key toggles.", positionInnerX, positionInnerY, 150, 18);
+    g_settingsUi.positionRadios[0] = createRadio(L"Top-left", positionInnerX, positionInnerY + 28, IDC_POS_TOP_LEFT, true);
+    g_settingsUi.positionRadios[1] = createRadio(L"Top-right", positionInnerX, positionInnerY + 54, IDC_POS_TOP_RIGHT);
+    g_settingsUi.positionRadios[2] = createRadio(L"Bottom-left", positionInnerX, positionInnerY + 80, IDC_POS_BOTTOM_LEFT);
+    g_settingsUi.positionRadios[3] = createRadio(L"Bottom-right", positionInnerX, positionInnerY + 106, IDC_POS_BOTTOM_RIGHT);
+    g_settingsUi.positionRadios[4] = createRadio(L"Custom", positionInnerX, positionInnerY + 132, IDC_POS_CUSTOM);
+    createLabel(L"Custom X", positionInnerX, positionInnerY + 164, 70, 20);
+    g_settingsUi.customXEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"100", WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, positionInnerX, positionInnerY + 184, 68, 26, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_X_EDIT), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.customXEdit, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
-    createLabel(L"Y:", positionX + 124, sectionTop + 150, 18, 20);
-    g_settingsUi.customYEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"100", WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, positionX + 144, sectionTop + 146, 70, 24, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_Y_EDIT), g_hInstance, nullptr);
+    createLabel(L"Custom Y", positionInnerX + 82, positionInnerY + 164, 70, 20);
+    g_settingsUi.customYEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"100", WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_AUTOHSCROLL, positionInnerX + 82, positionInnerY + 184, 68, 26, hwnd, reinterpret_cast<HMENU>(IDC_CUSTOM_Y_EDIT), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.customYEdit, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
 
-    const int appearanceX = 16;
-    const int appearanceTop = 260;
-    createLabel(L"3) Appearance", appearanceX, appearanceTop, 220, 20);
-    createLabel(L"Key size", appearanceX, appearanceTop + 32, 120, 20);
-    g_settingsUi.keySizeSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, appearanceX + 70, appearanceTop + 26, 220, 34, hwnd, reinterpret_cast<HMENU>(IDC_SIZE_SLIDER), g_hInstance, nullptr);
+    const int appearanceX = margin;
+    const int appearanceTop = 344;
+    createGroup(L"3) Appearance", appearanceX, appearanceTop, 636, 204);
+    createLabel(L"Key size", appearanceX + 18, appearanceTop + 38, 120, 20);
+    g_settingsUi.keySizeSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, appearanceX + 110, appearanceTop + 32, 418, 34, hwnd, reinterpret_cast<HMENU>(IDC_SIZE_SLIDER), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.keySizeSlider, TBM_SETRANGE, TRUE, MAKELONG(36, 120));
 
-    createLabel(L"Spacing", appearanceX, appearanceTop + 68, 120, 20);
-    g_settingsUi.spacingSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, appearanceX + 70, appearanceTop + 62, 220, 34, hwnd, reinterpret_cast<HMENU>(IDC_SPACING_SLIDER), g_hInstance, nullptr);
+    createLabel(L"Spacing", appearanceX + 18, appearanceTop + 90, 120, 20);
+    g_settingsUi.spacingSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, appearanceX + 110, appearanceTop + 84, 418, 34, hwnd, reinterpret_cast<HMENU>(IDC_SPACING_SLIDER), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.spacingSlider, TBM_SETRANGE, TRUE, MAKELONG(2, 36));
 
-    g_settingsUi.idleColorButton = CreateWindowExW(0, L"BUTTON", L"Idle Color", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, appearanceX, appearanceTop + 110, 100, 28, hwnd, reinterpret_cast<HMENU>(IDC_COLOR_IDLE), g_hInstance, nullptr);
-    g_settingsUi.activeColorButton = CreateWindowExW(0, L"BUTTON", L"Active Color", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, appearanceX + 110, appearanceTop + 110, 100, 28, hwnd, reinterpret_cast<HMENU>(IDC_COLOR_ACTIVE), g_hInstance, nullptr);
-    g_settingsUi.textColorButton = CreateWindowExW(0, L"BUTTON", L"Text Color", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, appearanceX + 220, appearanceTop + 110, 100, 28, hwnd, reinterpret_cast<HMENU>(IDC_COLOR_TEXT), g_hInstance, nullptr);
+    createLabel(L"Surface colors", appearanceX + 18, appearanceTop + 138, 120, 20);
+    g_settingsUi.idleColorButton = CreateWindowExW(0, L"BUTTON", L"Idle Color", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, appearanceX + 18, appearanceTop + 162, 132, 32, hwnd, reinterpret_cast<HMENU>(IDC_COLOR_IDLE), g_hInstance, nullptr);
+    g_settingsUi.activeColorButton = CreateWindowExW(0, L"BUTTON", L"Active Color", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, appearanceX + 164, appearanceTop + 162, 132, 32, hwnd, reinterpret_cast<HMENU>(IDC_COLOR_ACTIVE), g_hInstance, nullptr);
+    g_settingsUi.textColorButton = CreateWindowExW(0, L"BUTTON", L"Text Color", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, appearanceX + 310, appearanceTop + 162, 132, 32, hwnd, reinterpret_cast<HMENU>(IDC_COLOR_TEXT), g_hInstance, nullptr);
+    g_settingsUi.arrayButton = CreateWindowExW(0, L"BUTTON", L"Array", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, appearanceX + 456, appearanceTop + 162, 90, 32, hwnd, reinterpret_cast<HMENU>(IDC_ARRAY_BUTTON), g_hInstance, nullptr);
+    createLabel(L"Fill opacity", appearanceX + 456, appearanceTop + 38, 100, 20);
+    g_settingsUi.activeAlphaSlider = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS, appearanceX + 456, appearanceTop + 60, 164, 34, hwnd, reinterpret_cast<HMENU>(IDC_ACTIVE_ALPHA_SLIDER), g_hInstance, nullptr);
+    SendMessageW(g_settingsUi.activeAlphaSlider, TBM_SETRANGE, TRUE, MAKELONG(72, 255));
     SendMessageW(g_settingsUi.idleColorButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
     SendMessageW(g_settingsUi.activeColorButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
     SendMessageW(g_settingsUi.textColorButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
+    SendMessageW(g_settingsUi.arrayButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
 
-    const int previewX = 360;
-    const int previewTop = 260;
-    createLabel(L"4) Preview (simulated)", previewX, previewTop, 220, 20);
-    g_settingsUi.previewPanel = CreateWindowExW(WS_EX_CLIENTEDGE, kPreviewClassName, L"", WS_CHILD | WS_VISIBLE, previewX, previewTop + 26, 360, 230, hwnd, reinterpret_cast<HMENU>(IDC_PREVIEW_PANEL), g_hInstance, nullptr);
+    const int previewX = 674;
+    const int previewTop = sectionTop;
+    createGroup(L"4) Preview", previewX, previewTop, 402, 486);
+    createLabel(L"Live geometry preview.", previewX + 18, previewTop + 28, 180, 18);
+    g_settingsUi.previewPanel = CreateWindowExW(WS_EX_CLIENTEDGE, kPreviewClassName, L"", WS_CHILD | WS_VISIBLE, previewX + 18, previewTop + 54, 366, 408, hwnd, reinterpret_cast<HMENU>(IDC_PREVIEW_PANEL), g_hInstance, nullptr);
 
-    g_settingsUi.statusLabel = createLabel(L"", margin, 546, 390, 24);
-    g_settingsUi.startButton = CreateWindowExW(0, L"BUTTON", L"Start Overlay", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 430, 540, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_SETTINGS_START), g_hInstance, nullptr);
-    g_settingsUi.stopButton = CreateWindowExW(0, L"BUTTON", L"Stop Overlay", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 535, 540, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_SETTINGS_STOP), g_hInstance, nullptr);
-    g_settingsUi.closeButton = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 640, 540, 90, 30, hwnd, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE), g_hInstance, nullptr);
+    g_settingsUi.statusLabel = createLabel(L"", margin, 576, 520, 24);
+    g_settingsUi.startButton = CreateWindowExW(0, L"BUTTON", L"Start Overlay", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 760, 572, 122, 36, hwnd, reinterpret_cast<HMENU>(IDC_SETTINGS_START), g_hInstance, nullptr);
+    g_settingsUi.stopButton = CreateWindowExW(0, L"BUTTON", L"Stop Overlay", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 892, 572, 122, 36, hwnd, reinterpret_cast<HMENU>(IDC_SETTINGS_STOP), g_hInstance, nullptr);
+    g_settingsUi.closeButton = CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 1024, 572, 72, 36, hwnd, reinterpret_cast<HMENU>(IDC_SETTINGS_CLOSE), g_hInstance, nullptr);
     SendMessageW(g_settingsUi.startButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
     SendMessageW(g_settingsUi.stopButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
     SendMessageW(g_settingsUi.closeButton, WM_SETFONT, reinterpret_cast<WPARAM>(g_uiFont), TRUE);
@@ -777,15 +1276,39 @@ void UpdateSettingsActionControls() {
 
 LRESULT CALLBACK PreviewWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     (void)wParam;
-    (void)lParam;
     switch (message) {
+        case WM_LBUTTONDOWN: {
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            UINT vk = 0;
+            POINT offset{};
+            if (HitTestPreviewKey(pt, vk, offset)) {
+                g_draggingKey = vk;
+                g_dragOffset = offset;
+                SetCapture(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_MOUSEMOVE:
+            if (g_draggingKey != 0 && GetCapture() == hwnd) {
+                UpdateDraggedKeyPosition(POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+                return 0;
+            }
+            break;
+        case WM_LBUTTONUP:
+            if (g_draggingKey != 0) {
+                ReleaseCapture();
+                g_draggingKey = 0;
+                return 0;
+            }
+            break;
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
             RECT client{};
             GetClientRect(hwnd, &client);
 
-            HBRUSH background = CreateSolidBrush(RGB(246, 248, 250));
+            HBRUSH background = CreateSolidBrush(RGB(238, 242, 246));
             FillRect(hdc, &client, background);
             DeleteObject(background);
 
@@ -794,6 +1317,9 @@ LRESULT CALLBACK PreviewWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             EndPaint(hwnd, &ps);
             return 0;
         }
+        case WM_CAPTURECHANGED:
+            g_draggingKey = 0;
+            return 0;
     }
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
@@ -886,19 +1412,9 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
             switch (controlId) {
                 case IDC_CUSTOM_KEY_ADD: {
                     if (code == BN_CLICKED) {
-                        wchar_t text[64] = {};
-                        GetWindowTextW(g_settingsUi.customEdit, text, static_cast<int>(std::size(text)));
-                        UINT vk = 0;
-                        if (!ParseKeyText(text, vk)) {
-                            MessageBoxW(hwnd, L"Unknown key. Try examples: Q, F5, Space, Enter, Left.", kAppName, MB_OK | MB_ICONINFORMATION);
-                            return 0;
-                        }
-                        if (!IsVkSelected(vk)) {
-                            g_config.customKeys.push_back(vk);
-                            RefreshCustomKeyList();
-                            SetWindowTextW(g_settingsUi.customEdit, L"");
-                            NotifyConfigChanged();
-                        }
+                        g_captureCustomKey = true;
+                        SetCapturePrompt(L"Press the key you want to overlay...");
+                        SetFocus(hwnd);
                     }
                     return 0;
                 }
@@ -971,6 +1487,19 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
                         PickColor(hwnd, g_config.textColor);
                     }
                     return 0;
+                case IDC_ARRAY_BUTTON:
+                    if (code == BN_CLICKED) {
+                        g_arrayEditMode = !g_arrayEditMode;
+                        g_config.useCustomArrayLayout = g_arrayEditMode || g_config.useCustomArrayLayout;
+                        if (g_config.useCustomArrayLayout) {
+                            EnsureCustomArrayLayoutSeeded();
+                        }
+                        if (g_settingsUi.arrayButton != nullptr) {
+                            SetWindowTextW(g_settingsUi.arrayButton, g_arrayEditMode ? L"Done" : L"Array");
+                        }
+                        NotifyConfigChanged();
+                    }
+                    return 0;
                 case IDC_SETTINGS_START:
                     if (code == BN_CLICKED) {
                         StartOverlay();
@@ -984,7 +1513,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
 
                 case IDC_SETTINGS_CLOSE:
                     if (code == BN_CLICKED) {
-                        DestroyWindow(hwnd);
+                        RequestAppExit();
                     }
                     return 0;
             }
@@ -995,6 +1524,9 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
             const HWND source = reinterpret_cast<HWND>(lParam);
             if (source == g_settingsUi.keySizeSlider) {
                 g_config.keySize = static_cast<int>(SendMessageW(g_settingsUi.keySizeSlider, TBM_GETPOS, 0, 0));
+                if (g_config.useCustomArrayLayout) {
+                    EnsureCustomArrayLayoutSeeded();
+                }
                 NotifyConfigChanged();
                 return 0;
             }
@@ -1003,11 +1535,33 @@ LRESULT CALLBACK SettingsWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPAR
                 NotifyConfigChanged();
                 return 0;
             }
+            if (source == g_settingsUi.activeAlphaSlider) {
+                g_config.activeAlpha = static_cast<int>(SendMessageW(g_settingsUi.activeAlphaSlider, TBM_GETPOS, 0, 0));
+                NotifyConfigChanged();
+                return 0;
+            }
             break;
         }
 
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if (g_captureCustomKey) {
+                const UINT vk = NormalizeCapturedVKey(static_cast<UINT>(wParam));
+                if (vk == VK_ESCAPE) {
+                    g_captureCustomKey = false;
+                    SetCapturePrompt(L"Press the key you want to overlay");
+                    return 0;
+                }
+                if (TryAddCustomKey(vk)) {
+                    g_captureCustomKey = false;
+                    SetCapturePrompt(VkToLabel(vk).c_str());
+                }
+                return 0;
+            }
+            break;
+
         case WM_CLOSE:
-            DestroyWindow(hwnd);
+            RequestAppExit();
             return 0;
 
         case WM_DESTROY:
@@ -1088,7 +1642,8 @@ bool RegisterWindowClasses() {
     mainClass.lpfnWndProc = MainWindowProc;
     mainClass.hInstance = g_hInstance;
     mainClass.lpszClassName = kMainClassName;
-    mainClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    mainClass.hIcon = LoadAppIcon(GetSystemMetrics(SM_CXICON));
+    mainClass.hIconSm = LoadAppIcon(GetSystemMetrics(SM_CXSMICON));
     if (!RegisterClassExW(&mainClass)) {
         return false;
     }
@@ -1133,7 +1688,18 @@ bool RegisterWindowClasses() {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_hInstance = instance;
-    g_config.enabledDefaults.fill(true);
+    g_config.enabledDefaults.fill(false);
+    g_config.enabledDefaults[0] = true;   // Tab
+    g_config.enabledDefaults[1] = true;   // Q
+    g_config.enabledDefaults[2] = true;   // W
+    g_config.enabledDefaults[3] = true;   // E
+    g_config.enabledDefaults[4] = true;   // R
+    g_config.enabledDefaults[5] = true;   // Shift
+    g_config.enabledDefaults[6] = true;   // A
+    g_config.enabledDefaults[7] = true;   // S
+    g_config.enabledDefaults[8] = true;   // D
+    g_config.enabledDefaults[9] = true;   // F
+    g_config.enabledDefaults[10] = true;  // Ctrl
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
 
     INITCOMMONCONTROLSEX icc{};

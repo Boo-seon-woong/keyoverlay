@@ -11,6 +11,8 @@ TOOLCHAIN_ROOT="$TOOLCHAIN_DIR/$TOOLCHAIN_NAME"
 BIN_DIR="$TOOLCHAIN_ROOT/bin"
 OUT_DIR="$ROOT_DIR/dist"
 OUT_EXE="$OUT_DIR/SecureKeyOverlay.exe"
+OUT_ICO="$OUT_DIR/app.ico"
+OUT_RES="$OUT_DIR/app.res"
 
 mkdir -p "$TOOLCHAIN_DIR" "$OUT_DIR"
 
@@ -33,6 +35,22 @@ print("Extracted toolchain to .toolchain/")
 PY
 fi
 
+python3 - <<'PY'
+from pathlib import Path
+from PIL import Image
+
+src = Path("logo.png")
+dst = Path("dist/app.ico")
+img = Image.open(src).convert("RGBA")
+img.save(dst, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+print("Generated icon:", dst)
+PY
+
+"$BIN_DIR/llvm-windres" \
+  "$ROOT_DIR/app.rc" \
+  -O coff \
+  -o "$OUT_RES"
+
 "$BIN_DIR/x86_64-w64-mingw32-g++" \
   -std=c++17 \
   -O2 \
@@ -40,6 +58,7 @@ fi
   -mwindows \
   -static \
   "$ROOT_DIR/main.cpp" \
+  "$OUT_RES" \
   -o "$OUT_EXE" \
   -lcomctl32 -lcomdlg32 -lshell32 -lgdi32 -luser32 -lole32
 
